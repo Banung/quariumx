@@ -2,7 +2,7 @@
 
 A lightweight, flicker-free terminal ASCII aquarium simulation and screensaver written in Rust.
 
-Small colorful ASCII fish swim horizontally across your terminal with gentle vertical bobbing, preserving your terminal's native background transparency.
+Small colorful ASCII fish spawn directly inside your terminal and roam freely across its full width and height—turning organically more often as they approach the edges and bouncing off the walls—while preserving your terminal's native background transparency.
 
 ## Build & Run
 
@@ -28,7 +28,7 @@ USAGE:
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `-n`, `--fish <N>` | Number of fish (`1..=200`) | Auto-scaled by terminal size (`4..=24`) |
+| `-n`, `--fish <N>` | Number of fish (`1..=200`) | Auto-scaled at startup by terminal size (`4..=24`) |
 | `-f`, `--fps <N>` | Target frames per second (`5..=120`) | `30` |
 | `-s`, `--speed <F>` | Swimming speed multiplier (`0.1..=10.0`) | `1.0` |
 | `--no-color` | Disable ANSI color output | Color enabled |
