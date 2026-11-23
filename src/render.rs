@@ -10,7 +10,7 @@ use crossterm::{
     },
 };
 
-use crate::fish::{Aquarium, FishColor};
+use crate::fish::{Aquarium, CreatureKind, FishColor};
 
 /// RAII guard that manages terminal raw mode, alternate screen, and cursor visibility.
 pub struct TerminalGuard;
@@ -101,23 +101,32 @@ impl Renderer {
         let total_cells = w_usize * h_usize;
         let mut next_grid = vec![Cell::EMPTY; total_cells];
 
-        for fish in aquarium.fish() {
-            let row = fish.y().round() as i32;
-            if row < 0 || row >= height as i32 {
-                continue;
-            }
-            let start_x = fish.x().round() as i32;
-            let cell_color = if color { Some(fish.color()) } else { None };
+        const DRAW_ORDER: &[CreatureKind] = &[
+            CreatureKind::LargeFish,
+            CreatureKind::MediumFish,
+            CreatureKind::Jellyfish,
+            CreatureKind::SmallFish,
+            CreatureKind::Crab,
+        ];
 
-            for (i, ch) in fish.sprite().chars().enumerate() {
-                let col = start_x + i as i32;
-                if col >= 0 && col < width as i32 {
-                    let idx = (row as usize) * w_usize + (col as usize);
-                    next_grid[idx] = Cell {
-                        ch,
-                        color: cell_color,
-                    };
+        for &layer in DRAW_ORDER {
+            for fish in aquarium.fish() {
+                if fish.kind() != layer {
+                    continue;
                 }
+                let start_x = fish.x().round() as i32;
+                let start_y = fish.y().round() as i32;
+                let cell_color = if color { Some(fish.color()) } else { None };
+
+                Self::draw_sprite_lines(
+                    &mut next_grid,
+                    width,
+                    height,
+                    start_x,
+                    start_y,
+                    fish.sprite_lines(),
+                    cell_color,
+                );
             }
         }
 
@@ -177,6 +186,37 @@ impl Renderer {
 
         Ok(())
     }
+
+    fn draw_sprite_lines(
+        next_grid: &mut [Cell],
+        width: u16,
+        height: u16,
+        start_x: i32,
+        start_y: i32,
+        sprite_lines: &[&str],
+        cell_color: Option<FishColor>,
+    ) {
+        let w_usize = width as usize;
+        for (row_idx, line) in sprite_lines.iter().enumerate() {
+            let row = start_y + row_idx as i32;
+            if row < 0 || row >= height as i32 {
+                continue;
+            }
+            for (col_idx, ch) in line.chars().enumerate() {
+                if ch == ' ' {
+                    continue;
+                }
+                let col = start_x + col_idx as i32;
+                if col >= 0 && col < width as i32 {
+                    let idx = (row as usize) * w_usize + (col as usize);
+                    next_grid[idx] = Cell {
+                        ch,
+                        color: cell_color,
+                    };
+                }
+            }
+        }
+    }
 }
 
 fn map_fish_color(color: FishColor) -> Color {
@@ -200,6 +240,55 @@ fn map_fish_color(color: FishColor) -> Color {
 mod tests {
     use super::*;
     use crate::fish::{Direction, Fish};
+    use rand::{rngs::StdRng, SeedableRng};
+
+    /// Reconstruct a 2D character grid (`height` rows x `width` cols) from monochrome ANSI output.
+    fn parse_ansi_screen(output: &str, width: u16, height: u16) -> Vec<Vec<char>> {
+        let w = width as usize;
+        let h = height as usize;
+        let mut screen = vec![vec![' '; w]; h];
+        let mut cur_row = 0usize;
+        let mut cur_col = 0usize;
+        let bytes = output.as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                let start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    let cmd = bytes[i] as char;
+                    let params = &output[start..i];
+                    i += 1;
+                    if cmd == 'J' && params == "2" {
+                        for row in &mut screen {
+                            row.fill(' ');
+                        }
+                    } else if cmd == 'H' {
+                        let mut parts = params.split(';');
+                        let r1: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        let c1: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        cur_row = r1.saturating_sub(1);
+                        cur_col = c1.saturating_sub(1);
+                    }
+                }
+            } else {
+                let ch = output[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+                assert!(
+                    cur_row < h && cur_col < w,
+                    "ANSI output wrote character {ch:?} out of bounds at ({cur_col}, {cur_row}) on {w}x{h} screen"
+                );
+                screen[cur_row][cur_col] = ch;
+                cur_col += 1;
+            }
+        }
+
+        screen
+    }
 
     #[test]
     fn renders_full_fish_at_expected_coordinates() {
@@ -408,5 +497,271 @@ mod tests {
             out3.contains("\x1b[2J"),
             "resized frame must emit full screen clear: {out3:?}"
         );
+    }
+
+    #[test]
+    fn renders_multiline_creature_across_all_rows_at_expected_coordinates() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let large = Fish::spawn_kind(CreatureKind::LargeFish, 80, 24, &mut rng);
+        assert_eq!(large.height(), 5);
+        let start_x = large.x().round() as usize;
+        let start_y = large.y().round() as usize;
+        let lines: Vec<&'static str> = large.sprite_lines().to_vec();
+
+        let aq = Aquarium::from_fish(80, 24, vec![large], 1.0);
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+        renderer
+            .render_to(&mut buf, &aq, false)
+            .expect("multiline large fish render should succeed");
+        let output = String::from_utf8(buf).expect("valid utf8 output");
+        let screen = parse_ansi_screen(&output, 80, 24);
+
+        for (row_idx, line) in lines.iter().enumerate() {
+            let row = start_y + row_idx;
+            for (col_idx, ch) in line.chars().enumerate() {
+                let col = start_x + col_idx;
+                assert_eq!(
+                    screen[row][col], ch,
+                    "mismatch at (col={col}, row={row}) for large fish row {row_idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transparent_spaces_in_multiline_sprites_do_not_erase_overlapping_creatures() {
+        let mut rng = StdRng::seed_from_u64(7);
+
+        // Case 1: SmallFish ("><>") placed inside the leading transparent whitespace of a LargeFish at (0, 0).
+        // Every LargeFish species has >= 6 leading spaces on row 0.
+        let large = Fish::spawn_kind(CreatureKind::LargeFish, 0, 0, &mut rng);
+        assert_eq!(large.x().round() as i32, 0);
+        assert_eq!(large.y().round() as i32, 0);
+        assert!(
+            large.sprite_lines()[0].starts_with("      "),
+            "expected leading spaces on LargeFish row 0: {:?}",
+            large.sprite_lines()[0]
+        );
+        let small_in_large_padding =
+            Fish::new_for_test(1.0, 0.0, Direction::Right, FishColor::BrightYellow, "><>");
+
+        let aq1 = Aquarium::from_fish(40, 10, vec![small_in_large_padding, large.clone()], 1.0);
+        let mut renderer1 = Renderer::new();
+        let mut buf1 = Vec::new();
+        renderer1.render_to(&mut buf1, &aq1, false).unwrap();
+        let screen1 = parse_ansi_screen(&String::from_utf8(buf1).unwrap(), 40, 10);
+
+        // SmallFish at (1..4, 0) is preserved alongside LargeFish's dorsal fin on row 0
+        assert_eq!(screen1[0][1], '>');
+        assert_eq!(screen1[0][2], '<');
+        assert_eq!(screen1[0][3], '>');
+        for (col_idx, ch) in large.sprite_lines()[0].chars().enumerate() {
+            if ch != ' ' {
+                assert_eq!(
+                    screen1[0][col_idx], ch,
+                    "LargeFish non-space char at col {col_idx} row 0 should also appear"
+                );
+            }
+        }
+
+        // Case 2: Foreground multi-line creature with leading/trailing spaces (Crab at (0, 0),
+        // whose row 0 is " V\\_o_o_/V " with spaces at col 0 and col 10) drawn AFTER SmallFish ("><>")
+        // at (0, 0). The Crab's leading space at (0, 0) must NOT erase the SmallFish's '>' at (0, 0)!
+        let crab = Fish::spawn_kind(CreatureKind::Crab, 0, 2, &mut rng);
+        assert_eq!(crab.x().round() as i32, 0);
+        assert_eq!(crab.y().round() as i32, 0);
+        assert_eq!(crab.sprite_lines()[0].chars().next(), Some(' '));
+        let small_behind_crab =
+            Fish::new_for_test(0.0, 0.0, Direction::Right, FishColor::BrightCyan, "><>");
+
+        let aq2 = Aquarium::from_fish(25, 5, vec![crab.clone(), small_behind_crab], 1.0);
+        let mut renderer2 = Renderer::new();
+        let mut buf2 = Vec::new();
+        renderer2.render_to(&mut buf2, &aq2, false).unwrap();
+        let screen2 = parse_ansi_screen(&String::from_utf8(buf2).unwrap(), 25, 5);
+
+        // Col 0 has Crab's transparent ' ', so SmallFish's '>' at (0, 0) remains visible!
+        assert_eq!(
+            screen2[0][0], '>',
+            "Crab's leading transparent space at (0, 0) must not erase SmallFish's '>'"
+        );
+        // Col 1 has Crab's non-space claw ('V' or 'v'), which renders in front of SmallFish's '<'
+        let expected_claw = crab.sprite_lines()[0].chars().nth(1).unwrap();
+        assert_eq!(screen2[0][1], expected_claw);
+    }
+
+    #[test]
+    fn z_order_layering_renders_small_fish_and_crab_in_front_of_large_fish_regardless_of_slice_order() {
+        let mut rng = StdRng::seed_from_u64(99);
+        let large = Fish::spawn_kind(CreatureKind::LargeFish, 0, 0, &mut rng);
+        assert_eq!(large.x().round() as i32, 0);
+        assert_eq!(large.y().round() as i32, 0);
+
+        // Row 2 of every LargeFish has non-space characters at cols 2..5
+        let overlap_row = 2usize;
+        let overlap_col = large.sprite_lines()[overlap_row]
+            .char_indices()
+            .find(|&(_, ch)| ch != ' ')
+            .map(|(idx, _)| idx)
+            .expect("LargeFish row 2 must have non-space characters");
+
+        let small = Fish::new_for_test(
+            overlap_col as f32,
+            overlap_row as f32,
+            Direction::Right,
+            FishColor::BrightRed,
+            "><>",
+        );
+
+        // Test both slice orderings in aquarium.fish()
+        for creatures in [
+            vec![large.clone(), small.clone()],
+            vec![small.clone(), large.clone()],
+        ] {
+            let aq = Aquarium::from_fish(40, 10, creatures, 1.0);
+            let mut renderer = Renderer::new();
+            let mut buf = Vec::new();
+            renderer.render_to(&mut buf, &aq, true).unwrap();
+
+            // Verify in backbuffer that SmallFish won at the overlapping cells with its color
+            let idx0 = overlap_row * 40 + overlap_col;
+            assert_eq!(
+                renderer.prev_grid[idx0],
+                Cell {
+                    ch: '>',
+                    color: Some(FishColor::BrightRed),
+                }
+            );
+            assert_eq!(
+                renderer.prev_grid[idx0 + 1],
+                Cell {
+                    ch: '<',
+                    color: Some(FishColor::BrightRed),
+                }
+            );
+            assert_eq!(
+                renderer.prev_grid[idx0 + 2],
+                Cell {
+                    ch: '>',
+                    color: Some(FishColor::BrightRed),
+                }
+            );
+        }
+
+        // Also verify Crab (layer 5) wins over LargeFish (layer 1) and SmallFish (layer 4)
+        let crab = Fish::spawn_kind(CreatureKind::Crab, 0, 2, &mut rng);
+        assert_eq!(crab.x().round() as i32, 0);
+        assert_eq!(crab.y().round() as i32, 0);
+        let small_at_crab = Fish::new_for_test(1.0, 1.0, Direction::Right, FishColor::Green, "><>");
+
+        for creatures in [
+            vec![crab.clone(), small_at_crab.clone(), large.clone()],
+            vec![large.clone(), small_at_crab.clone(), crab.clone()],
+        ] {
+            let aq = Aquarium::from_fish(40, 10, creatures, 1.0);
+            let mut renderer = Renderer::new();
+            let mut buf = Vec::new();
+            renderer.render_to(&mut buf, &aq, true).unwrap();
+
+            let expected_crab_ch = crab.sprite_lines()[1].chars().nth(1).unwrap();
+            assert_ne!(expected_crab_ch, ' ');
+            assert_eq!(
+                renderer.prev_grid[40 + 1],
+                Cell {
+                    ch: expected_crab_ch,
+                    color: Some(crab.color()),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn clips_multiline_creatures_at_top_bottom_left_and_right_edges_safely() {
+        let mut rng = StdRng::seed_from_u64(123);
+        let crab = Fish::spawn_kind(CreatureKind::Crab, 11, 6, &mut rng);
+        // With screen_width=11 (== crab.width()) and screen_height=6, crab spawns at (0.0, 4.0)
+        assert_eq!(crab.x().round() as i32, 0);
+        assert_eq!(crab.y().round() as i32, 4);
+        let crab_lines = crab.sprite_lines();
+
+        // 1. Bottom edge via Renderer::render_to: height = 5 so crab is at y = 4 = height - 1.
+        // Only row 0 of crab renders at row 4; row 1 (y = 5) is clipped cleanly.
+        let aq_bottom = Aquarium::from_fish(15, 5, vec![crab.clone()], 1.0);
+        let mut renderer_bottom = Renderer::new();
+        let mut buf_bottom = Vec::new();
+        renderer_bottom
+            .render_to(&mut buf_bottom, &aq_bottom, false)
+            .expect("bottom-clipped multiline render must succeed");
+        let screen_bottom =
+            parse_ansi_screen(&String::from_utf8(buf_bottom).unwrap(), 15, 5);
+        for (col_idx, ch) in crab_lines[0].chars().enumerate() {
+            assert_eq!(screen_bottom[4][col_idx], ch);
+        }
+
+        // 2. Right edge via Renderer::render_to: width = 2 so crab at x = 0 is at x = width - 2.
+        // Only cols 0..2 of both rows render; cols 2..11 are clipped without wrapping.
+        let aq_right = Aquarium::from_fish(2, 6, vec![crab.clone()], 1.0);
+        let mut renderer_right = Renderer::new();
+        let mut buf_right = Vec::new();
+        renderer_right
+            .render_to(&mut buf_right, &aq_right, false)
+            .expect("right-clipped multiline render must succeed");
+        let screen_right =
+            parse_ansi_screen(&String::from_utf8(buf_right).unwrap(), 2, 6);
+        for row_idx in 0..2 {
+            for col_idx in 0..2 {
+                let expected = crab_lines[row_idx].chars().nth(col_idx).unwrap();
+                assert_eq!(screen_right[4 + row_idx][col_idx], expected);
+            }
+        }
+
+        // 3. Top (y = -1), bottom (y = height - 1), left (x = -2), and right (x = width - 2)
+        // multi-line 2D clipping on a 3-row MediumFish sprite:
+        let medium = Fish::spawn_kind(CreatureKind::MediumFish, 0, 0, &mut rng);
+        let med_lines = medium.sprite_lines();
+        assert_eq!(med_lines.len(), 3);
+        let w = 15u16;
+        let h = 6u16;
+
+        // Top edge (y = -1): row 0 clipped, row 1 -> screen row 0, row 2 -> screen row 1
+        let mut grid_top = vec![Cell::EMPTY; (w as usize) * (h as usize)];
+        Renderer::draw_sprite_lines(&mut grid_top, w, h, 2, -1, med_lines, None);
+        for (out_row, src_row) in [(0usize, 1usize), (1usize, 2usize)] {
+            for (col_idx, ch) in med_lines[src_row].chars().enumerate() {
+                assert_eq!(grid_top[out_row * (w as usize) + (2 + col_idx)].ch, ch);
+            }
+        }
+
+        // Bottom edge (y = height - 1 = 5): row 0 -> screen row 5, rows 1 & 2 clipped
+        let mut grid_bot = vec![Cell::EMPTY; (w as usize) * (h as usize)];
+        Renderer::draw_sprite_lines(&mut grid_bot, w, h, 2, (h as i32) - 1, med_lines, None);
+        for (col_idx, ch) in med_lines[0].chars().enumerate() {
+            assert_eq!(grid_bot[5 * (w as usize) + (2 + col_idx)].ch, ch);
+        }
+
+        // Left edge (x = -2): cols 0 & 1 clipped on every row, cols 2.. render at 0..
+        let mut grid_left = vec![Cell::EMPTY; (w as usize) * (h as usize)];
+        Renderer::draw_sprite_lines(&mut grid_left, w, h, -2, 1, med_lines, None);
+        for (row_idx, line) in med_lines.iter().enumerate() {
+            for (col_idx, ch) in line.chars().enumerate().skip(2) {
+                assert_eq!(
+                    grid_left[(1 + row_idx) * (w as usize) + (col_idx - 2)].ch,
+                    ch
+                );
+            }
+        }
+
+        // Right edge (x = width - 2 = 13): cols 0 & 1 render at 13 & 14 on every row, cols 2.. clipped
+        let mut grid_right = vec![Cell::EMPTY; (w as usize) * (h as usize)];
+        Renderer::draw_sprite_lines(&mut grid_right, w, h, (w as i32) - 2, 1, med_lines, None);
+        for (row_idx, line) in med_lines.iter().enumerate() {
+            for (col_idx, ch) in line.chars().enumerate().take(2) {
+                assert_eq!(
+                    grid_right[(1 + row_idx) * (w as usize) + ((w as usize) - 2 + col_idx)].ch,
+                    ch
+                );
+            }
+        }
     }
 }
