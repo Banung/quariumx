@@ -1,0 +1,10 @@
+[package]
+name = "quariumx"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight terminal ASCII aquarium simulation"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.28"
+rand = "0.8"
