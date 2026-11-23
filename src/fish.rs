@@ -15,8 +15,8 @@ const MAX_INITIAL_TURN_COOLDOWN: f32 = 1.2;
 const MIN_TURN_COOLDOWN: f32 = 0.8;
 const MAX_TURN_COOLDOWN: f32 = 1.6;
 
-const BASE_H_TURN_RATE: f32 = 0.03;
-const EDGE_H_TURN_RATE: f32 = 1.4;
+const H_TURN_START: f32 = 0.68;
+const H_EDGE_TURN_STRENGTH: f32 = 1.5;
 const BASE_V_TURN_RATE: f32 = 0.04;
 const EDGE_V_TURN_RATE: f32 = 1.4;
 
@@ -153,6 +153,31 @@ pub fn edge_weighted_turn_prob(progress: f32, dt: f32, base_rate: f32, edge_rate
     (1.0 - (-rate * dt).exp()).clamp(0.0, 1.0)
 }
 
+/// Compute width-, speed-, and frame-rate-invariant horizontal edge-zone turn probability.
+///
+/// `progress` is the normalized proximity (`0.0..=1.0`) toward the horizontal edge the fish
+/// is currently approaching (`0.0` at the far wall, `1.0` at the target wall).
+/// Returns `0.0` when `progress <= H_TURN_START` (`0.68`) so fish swim freely across the
+/// middle without spontaneous center turning.
+pub fn horizontal_edge_turn_prob(progress: f32, step_distance: f32, max_x: f32) -> f32 {
+    if !step_distance.is_finite()
+        || step_distance <= 0.0
+        || !max_x.is_finite()
+        || max_x <= 0.0
+        || progress.is_nan()
+    {
+        return 0.0;
+    }
+    let p = progress.clamp(0.0, 1.0);
+    if p <= H_TURN_START {
+        return 0.0;
+    }
+    let edge_span = 1.0 - H_TURN_START;
+    let u = (p - H_TURN_START) / edge_span;
+    let du = step_distance / (max_x * edge_span);
+    (1.0 - (-(H_EDGE_TURN_STRENGTH * u * u) * du).exp()).clamp(0.0, 1.0)
+}
+
 /// A single swimming fish inside the aquarium.
 #[derive(Debug, Clone)]
 pub struct Fish {
@@ -234,6 +259,11 @@ impl Fish {
     /// Compute frame-rate-independent edge-weighted turn probability for a step `dt`.
     pub fn edge_weighted_turn_prob(progress: f32, dt: f32, base_rate: f32, edge_rate: f32) -> f32 {
         edge_weighted_turn_prob(progress, dt, base_rate, edge_rate)
+    }
+
+    /// Compute width-, speed-, and frame-rate-invariant horizontal edge-zone turn probability.
+    pub fn horizontal_edge_turn_prob(progress: f32, step_distance: f32, max_x: f32) -> f32 {
+        horizontal_edge_turn_prob(progress, step_distance, max_x)
     }
 
     /// Spawn a fish directly inside the visible terminal bounds.
@@ -366,8 +396,8 @@ impl Fish {
                     Direction::Right => (self.x / max_x).clamp(0.0, 1.0),
                     Direction::Left => (1.0 - self.x / max_x).clamp(0.0, 1.0),
                 };
-                let p_turn =
-                    edge_weighted_turn_prob(px, dt_eff, BASE_H_TURN_RATE, EDGE_H_TURN_RATE);
+                let step_distance = self.speed * dt_eff;
+                let p_turn = horizontal_edge_turn_prob(px, step_distance, max_x);
                 if rng.gen::<f32>() < p_turn {
                     self.direction = self.direction.flip();
                     self.h_turn_cooldown = rng.gen_range(MIN_TURN_COOLDOWN..=MAX_TURN_COOLDOWN);
@@ -834,26 +864,26 @@ mod tests {
     #[test]
     fn edge_weighted_turn_probability_is_monotonic_and_triggers_near_edges() {
         assert_eq!(
-            edge_weighted_turn_prob(0.5, 0.0, BASE_H_TURN_RATE, EDGE_H_TURN_RATE),
+            edge_weighted_turn_prob(0.5, 0.0, BASE_V_TURN_RATE, EDGE_V_TURN_RATE),
             0.0
         );
         assert_eq!(
-            edge_weighted_turn_prob(0.5, -0.5, BASE_H_TURN_RATE, EDGE_H_TURN_RATE),
+            edge_weighted_turn_prob(0.5, -0.5, BASE_V_TURN_RATE, EDGE_V_TURN_RATE),
             0.0
         );
         assert_eq!(
-            edge_weighted_turn_prob(0.5, f32::NAN, BASE_H_TURN_RATE, EDGE_H_TURN_RATE),
+            edge_weighted_turn_prob(0.5, f32::NAN, BASE_V_TURN_RATE, EDGE_V_TURN_RATE),
             0.0
         );
         assert_eq!(
-            edge_weighted_turn_prob(0.5, f32::INFINITY, BASE_H_TURN_RATE, EDGE_H_TURN_RATE),
+            edge_weighted_turn_prob(0.5, f32::INFINITY, BASE_V_TURN_RATE, EDGE_V_TURN_RATE),
             0.0
         );
 
-        let p_low = edge_weighted_turn_prob(0.1, 0.1, BASE_H_TURN_RATE, EDGE_H_TURN_RATE);
-        let p_mid = edge_weighted_turn_prob(0.5, 0.1, BASE_H_TURN_RATE, EDGE_H_TURN_RATE);
-        let p_high = edge_weighted_turn_prob(0.9, 0.1, BASE_H_TURN_RATE, EDGE_H_TURN_RATE);
-        let p_edge = edge_weighted_turn_prob(1.0, 0.1, BASE_H_TURN_RATE, EDGE_H_TURN_RATE);
+        let p_low = edge_weighted_turn_prob(0.1, 0.1, BASE_V_TURN_RATE, EDGE_V_TURN_RATE);
+        let p_mid = edge_weighted_turn_prob(0.5, 0.1, BASE_V_TURN_RATE, EDGE_V_TURN_RATE);
+        let p_high = edge_weighted_turn_prob(0.9, 0.1, BASE_V_TURN_RATE, EDGE_V_TURN_RATE);
+        let p_edge = edge_weighted_turn_prob(1.0, 0.1, BASE_V_TURN_RATE, EDGE_V_TURN_RATE);
 
         assert!(p_low > 0.0 && p_low < 0.01, "center turn prob should be very low: {p_low}");
         assert!(p_low < p_mid, "expected p(0.1) < p(0.5): {p_low} vs {p_mid}");
@@ -864,61 +894,8 @@ mod tests {
             "near-edge turn prob ({p_high}) should be much larger than near-center ({p_low})"
         );
 
-        // Statistical horizontal check over 1000 single-step trials (fish stops well short of wall max_x=97)
-        let mut rng = StdRng::seed_from_u64(314159);
-        let mut center_h_turns = 0usize;
-        let mut edge_h_turns = 0usize;
-
-        for _ in 0..1000 {
-            let center_fish = Fish::with_motion(
-                20.0,
-                10.0,
-                Direction::Right,
-                5.0,
-                VerticalDirection::Down,
-                0.0,
-                0.0,
-                1.0,
-                FishColor::Cyan,
-                "><>",
-            );
-            let edge_fish = Fish::with_motion(
-                93.0,
-                10.0,
-                Direction::Right,
-                5.0,
-                VerticalDirection::Down,
-                0.0,
-                0.0,
-                1.0,
-                FishColor::Cyan,
-                "><>",
-            );
-            let mut aq = Aquarium::from_fish(100, 24, vec![center_fish, edge_fish], 1.0);
-            aq.update(0.1, &mut rng);
-
-            // Neither fish reached max_x = 97.0 (x is 20.5 and 93.5)
-            assert!(aq.fish()[0].x() < 97.0);
-            assert!(aq.fish()[1].x() < 97.0);
-
-            if aq.fish()[0].direction() == Direction::Left {
-                center_h_turns += 1;
-            }
-            if aq.fish()[1].direction() == Direction::Left {
-                edge_h_turns += 1;
-            }
-        }
-
-        assert!(
-            edge_h_turns > 60,
-            "expected many pre-wall turns near horizontal edge, got {edge_h_turns}"
-        );
-        assert!(
-            edge_h_turns > center_h_turns * 5,
-            "expected near-edge horizontal turns ({edge_h_turns}) >> center turns ({center_h_turns})"
-        );
-
         // Statistical vertical check over 1000 single-step trials (fish stops short of max_y=23)
+        let mut rng = StdRng::seed_from_u64(314159);
         let mut center_v_turns = 0usize;
         let mut edge_v_turns = 0usize;
 
@@ -968,6 +945,142 @@ mod tests {
         assert!(
             edge_v_turns > center_v_turns * 5,
             "expected near-edge vertical turns ({edge_v_turns}) >> center turns ({center_v_turns})"
+        );
+    }
+
+    #[test]
+    fn horizontal_edge_turn_probability_is_zero_in_center_and_monotonic_in_edge_zone() {
+        // Zero throughout the far side and center (progress <= 0.68)
+        assert_eq!(horizontal_edge_turn_prob(0.0, 1.0, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.25, 1.0, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.5, 1.0, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.68, 1.0, 100.0), 0.0);
+        assert_eq!(Fish::horizontal_edge_turn_prob(0.68, 1.0, 100.0), 0.0);
+
+        // Invalid or non-positive inputs return 0.0
+        assert_eq!(horizontal_edge_turn_prob(0.9, 0.0, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, -1.0, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, f32::NAN, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, f32::INFINITY, 100.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, 1.0, 0.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, 1.0, -50.0), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, 1.0, f32::NAN), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(0.9, 1.0, f32::INFINITY), 0.0);
+        assert_eq!(horizontal_edge_turn_prob(f32::NAN, 1.0, 100.0), 0.0);
+
+        // Strictly monotonically increasing in the outer edge zone (0.68..=1.0)
+        let p_70 = horizontal_edge_turn_prob(0.70, 1.0, 100.0);
+        let p_85 = horizontal_edge_turn_prob(0.85, 1.0, 100.0);
+        let p_95 = horizontal_edge_turn_prob(0.95, 1.0, 100.0);
+        let p_100 = horizontal_edge_turn_prob(1.0, 1.0, 100.0);
+
+        assert!(p_70 > 0.0, "expected p(0.70) > 0.0, got {p_70}");
+        assert!(p_70 < p_85, "expected p(0.70) < p(0.85): {p_70} vs {p_85}");
+        assert!(p_85 < p_95, "expected p(0.85) < p(0.95): {p_85} vs {p_95}");
+        assert!(p_95 < p_100, "expected p(0.95) < p(1.0): {p_95} vs {p_100}");
+
+        // Statistical horizontal check over 1000 single-step trials:
+        // center trials (x = 48.5 on width 100, cooldown = 0.0) produce 0 turns,
+        // near-edge trials (x = 93.0 on width 100, cooldown = 0.0, speed = 8.0, dt = 0.2 -> x = 94.6 < max_x = 97.0)
+        // produce pre-wall turns (> 0).
+        let mut rng = StdRng::seed_from_u64(314159);
+        let mut center_h_turns = 0usize;
+        let mut edge_h_turns = 0usize;
+
+        for _ in 0..1000 {
+            let center_fish = Fish::with_motion(
+                48.5,
+                10.0,
+                Direction::Right,
+                8.0,
+                VerticalDirection::Down,
+                0.0,
+                0.0,
+                1.0,
+                FishColor::Cyan,
+                "><>",
+            );
+            let edge_fish = Fish::with_motion(
+                93.0,
+                10.0,
+                Direction::Right,
+                8.0,
+                VerticalDirection::Down,
+                0.0,
+                0.0,
+                1.0,
+                FishColor::Cyan,
+                "><>",
+            );
+            let mut aq = Aquarium::from_fish(100, 24, vec![center_fish, edge_fish], 1.0);
+            aq.update(0.2, &mut rng);
+
+            // Neither fish reached max_x = 97.0 (x is 50.1 and 94.6)
+            assert!(aq.fish()[0].x() < 97.0);
+            assert!(aq.fish()[1].x() < 97.0);
+
+            if aq.fish()[0].direction() == Direction::Left {
+                center_h_turns += 1;
+            }
+            if aq.fish()[1].direction() == Direction::Left {
+                edge_h_turns += 1;
+            }
+        }
+
+        assert_eq!(
+            center_h_turns, 0,
+            "fish in the center of the tank must never turn spontaneously, got {center_h_turns}"
+        );
+        assert!(
+            edge_h_turns > 0,
+            "expected pre-wall turns near horizontal edge, got {edge_h_turns}"
+        );
+    }
+
+    #[test]
+    fn wide_terminal_fish_spread_across_full_width_without_center_clustering() {
+        let mut rng = StdRng::seed_from_u64(202604);
+        let mut aq = Aquarium::new(160, 24, Some(20), 1.0, &mut rng);
+
+        let mut left_samples = 0usize;
+        let mut middle_samples = 0usize;
+        let mut right_samples = 0usize;
+        let mut total_samples = 0usize;
+
+        for _ in 0..1000 {
+            aq.update(0.05, &mut rng);
+            for fish in aq.fish() {
+                let max_x = (160 - fish.width()) as f32;
+                let x = fish.x();
+                if x < max_x / 3.0 {
+                    left_samples += 1;
+                } else if x > 2.0 * max_x / 3.0 {
+                    right_samples += 1;
+                } else {
+                    middle_samples += 1;
+                }
+                total_samples += 1;
+            }
+        }
+
+        let left_frac = left_samples as f32 / total_samples as f32;
+        let middle_frac = middle_samples as f32 / total_samples as f32;
+        let right_frac = right_samples as f32 / total_samples as f32;
+
+        assert!(
+            left_frac >= 0.20,
+            "expected left outer third >= 20%, got {:.1}%",
+            left_frac * 100.0
+        );
+        assert!(
+            right_frac >= 0.20,
+            "expected right outer third >= 20%, got {:.1}%",
+            right_frac * 100.0
+        );
+        assert!(
+            middle_frac <= 0.55,
+            "expected middle third <= 55% (no center clustering), got {:.1}%",
+            middle_frac * 100.0
         );
     }
 
