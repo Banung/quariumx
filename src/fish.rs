@@ -4,6 +4,7 @@ pub use crate::creatures::{
     AnimatedSprite, CreatureKind, DirectionalSprite, CRAB_SPECIES, JELLYFISH_SPECIES,
     LARGE_FISH_SPECIES, MEDIUM_FISH_SPECIES,
 };
+pub use crate::scenery::{Coral, CoralSprite, Scenery, Seaweed, CORAL_SPECIES};
 
 const MAX_FISH_COUNT: usize = 200;
 const AUTO_SCALE_CELLS_PER_FISH: usize = 220;
@@ -705,6 +706,7 @@ pub struct Aquarium {
     fish: Vec<Fish>,
     target_fish_count: usize,
     speed_scale: f32,
+    scenery: Scenery,
 }
 
 impl Aquarium {
@@ -733,12 +735,15 @@ impl Aquarium {
             }
         }
 
+        let scenery = Scenery::generate(width, height, rng);
+
         Self {
             width,
             height,
             fish,
             target_fish_count,
             speed_scale,
+            scenery,
         }
     }
 
@@ -751,7 +756,14 @@ impl Aquarium {
             fish,
             target_fish_count,
             speed_scale,
+            scenery: Scenery::empty(),
         }
+    }
+
+    /// Replace the aquarium's scenery (useful for deterministic renderer tests).
+    pub fn with_scenery(mut self, scenery: Scenery) -> Self {
+        self.scenery = scenery;
+        self
     }
 
     fn auto_species_plan(width: u16, height: u16) -> Vec<CreatureKind> {
@@ -893,6 +905,11 @@ impl Aquarium {
         self.fish.len()
     }
 
+    /// Current seabed scenery (coral reefs and swaying seaweed).
+    pub fn scenery(&self) -> &Scenery {
+        &self.scenery
+    }
+
     /// Advance the simulation by `dt` seconds while keeping all creatures permanently inside bounds.
     pub fn update<R: Rng + ?Sized>(&mut self, dt: f32, rng: &mut R) {
         if self.width == 0 || self.height == 0 || !dt.is_finite() || dt <= 0.0 {
@@ -907,6 +924,7 @@ impl Aquarium {
         for fish in &mut self.fish {
             fish.advance(dt, scale, self.width, self.height, rng);
         }
+        self.scenery.update(dt * scale);
     }
 
     /// Handle terminal resize by clamping existing creatures into the new bounds without adding or removing any.
@@ -917,6 +935,8 @@ impl Aquarium {
         if width == 0 || height == 0 {
             return;
         }
+
+        self.scenery.resize(width, height, rng);
 
         if self.fish.is_empty() && self.target_fish_count > 0 {
             let plan = Self::explicit_species_plan(width, height, self.target_fish_count);
@@ -1725,5 +1745,57 @@ mod tests {
                 assert!(fish.y() >= 0.0 && fish.y() <= max_y);
             }
         }
+    }
+
+    #[test]
+    fn aquarium_scenery_lifecycle_generates_animates_and_resizes() {
+        let mut rng = StdRng::seed_from_u64(2027);
+
+        let mut aq = Aquarium::new(80, 24, None, 1.0, &mut rng);
+        assert!(!aq.scenery().corals().is_empty());
+        assert!(!aq.scenery().seaweed().is_empty());
+
+        let fish_count = aq.fish_count();
+        let initial_cells: Vec<Vec<(i32, i32, char)>> = aq
+            .scenery()
+            .seaweed()
+            .iter()
+            .map(|s| s.cells(80, 24))
+            .collect();
+
+        let mut animated = false;
+        for _ in 0..10 {
+            aq.update(0.2, &mut rng);
+            let next_cells: Vec<Vec<(i32, i32, char)>> = aq
+                .scenery()
+                .seaweed()
+                .iter()
+                .map(|s| s.cells(80, 24))
+                .collect();
+            if next_cells != initial_cells {
+                animated = true;
+            }
+        }
+        assert!(animated, "Aquarium::update should animate seaweed stalks");
+        assert_eq!(aq.fish_count(), fish_count);
+
+        let coral_count = aq.scenery().corals().len();
+        let seaweed_count = aq.scenery().seaweed().len();
+        aq.resize(120, 30, &mut rng);
+        assert_eq!(aq.scenery().corals().len(), coral_count);
+        assert_eq!(aq.scenery().seaweed().len(), seaweed_count);
+
+        // Aquarium::from_fish starts with empty scenery
+        let det = Aquarium::from_fish(80, 24, Vec::new(), 1.0);
+        assert!(det.scenery().corals().is_empty());
+        assert!(det.scenery().seaweed().is_empty());
+
+        // Aquarium::new(0, 0, ...) starts empty and populates scenery when resized to 80x24
+        let mut zero_aq = Aquarium::new(0, 0, None, 1.0, &mut rng);
+        assert!(zero_aq.scenery().corals().is_empty());
+        assert!(zero_aq.scenery().seaweed().is_empty());
+        zero_aq.resize(80, 24, &mut rng);
+        assert!(!zero_aq.scenery().corals().is_empty());
+        assert!(!zero_aq.scenery().seaweed().is_empty());
     }
 }

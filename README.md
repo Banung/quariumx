@@ -11,6 +11,7 @@ A vibrant marine ecosystem spawns directly inside your terminal and roams freely
 - **Large fish** — 5-row directional deep-water species: shark, swordfish, and whale cruising smoothly in the background layer
 - **Jellyfish** — 4-row animated jellyfish drifting with pulsing bells and tentacles
 - **Seabed crabs** — 2-row animated crabs with snapping claws and scuttling legs walking along the terminal floor
+- **Seabed scenery** — swaying seaweed/kelp clusters and 4 multi-line ASCII coral reef formations (staghorn, brain coral, sea fan, and tube coral) layered behind all swimming creatures
 
 ## Build & Run
 

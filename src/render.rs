@@ -101,6 +101,35 @@ impl Renderer {
         let total_cells = w_usize * h_usize;
         let mut next_grid = vec![Cell::EMPTY; total_cells];
 
+        for stalk in aquarium.scenery().seaweed() {
+            let cell_color = if color { Some(stalk.color()) } else { None };
+            for (col, row, ch) in stalk.cells(width, height) {
+                if ch == ' ' {
+                    continue;
+                }
+                if col >= 0 && col < width as i32 && row >= 0 && row < height as i32 {
+                    let idx = (row as usize) * w_usize + (col as usize);
+                    next_grid[idx] = Cell {
+                        ch,
+                        color: cell_color,
+                    };
+                }
+            }
+        }
+
+        for coral in aquarium.scenery().corals() {
+            let cell_color = if color { Some(coral.color()) } else { None };
+            Self::draw_sprite_lines(
+                &mut next_grid,
+                width,
+                height,
+                coral.anchor_col(width),
+                coral.top_row(height),
+                coral.lines(),
+                cell_color,
+            );
+        }
+
         const DRAW_ORDER: &[CreatureKind] = &[
             CreatureKind::LargeFish,
             CreatureKind::MediumFish,
@@ -240,13 +269,13 @@ fn map_fish_color(color: FishColor) -> Color {
 mod tests {
     use super::*;
     use crate::fish::{Direction, Fish};
+    use crate::scenery::{Coral, Scenery, Seaweed, CORAL_SPECIES};
     use rand::{rngs::StdRng, SeedableRng};
 
-    /// Reconstruct a 2D character grid (`height` rows x `width` cols) from monochrome ANSI output.
-    fn parse_ansi_screen(output: &str, width: u16, height: u16) -> Vec<Vec<char>> {
-        let w = width as usize;
-        let h = height as usize;
-        let mut screen = vec![vec![' '; w]; h];
+    /// Apply monochrome ANSI output onto an existing 2D character grid (`height` rows x `width` cols).
+    fn apply_ansi_screen(screen: &mut [Vec<char>], output: &str) {
+        let h = screen.len();
+        let w = screen.first().map_or(0, Vec::len);
         let mut cur_row = 0usize;
         let mut cur_col = 0usize;
         let bytes = output.as_bytes();
@@ -264,7 +293,7 @@ mod tests {
                     let params = &output[start..i];
                     i += 1;
                     if cmd == 'J' && params == "2" {
-                        for row in &mut screen {
+                        for row in screen.iter_mut() {
                             row.fill(' ');
                         }
                     } else if cmd == 'H' {
@@ -286,7 +315,12 @@ mod tests {
                 cur_col += 1;
             }
         }
+    }
 
+    /// Reconstruct a 2D character grid (`height` rows x `width` cols) from monochrome ANSI output.
+    fn parse_ansi_screen(output: &str, width: u16, height: u16) -> Vec<Vec<char>> {
+        let mut screen = vec![vec![' '; width as usize]; height as usize];
+        apply_ansi_screen(&mut screen, output);
         screen
     }
 
@@ -761,6 +795,379 @@ mod tests {
                     grid_right[(1 + row_idx) * (w as usize) + ((w as usize) - 2 + col_idx)].ch,
                     ch
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn renders_coral_and_seaweed_at_expected_seabed_coordinates() {
+        let width = 40u16;
+        let height = 12u16;
+        let coral = Coral::new(0.0, CORAL_SPECIES[1], FishColor::BrightMagenta);
+        let seaweed = Seaweed::new(0.75, 5, FishColor::BrightGreen, 0.0, 1.5);
+
+        let anchor_col = coral.anchor_col(width);
+        let top_row = coral.top_row(height);
+        let coral_lines = coral.lines();
+        let sw_cells = seaweed.cells(width, height);
+        assert_eq!(sw_cells[0].1, (height - 1) as i32, "seaweed root must sit on bottom row");
+
+        let aq = Aquarium::from_fish(width, height, vec![], 1.0)
+            .with_scenery(Scenery::from_parts(vec![coral.clone()], vec![seaweed.clone()]));
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+        renderer.render_to(&mut buf, &aq, false).unwrap();
+        let screen = parse_ansi_screen(&String::from_utf8(buf).unwrap(), width, height);
+
+        assert_eq!(top_row + coral.height() as i32 - 1, height as i32 - 1);
+        for (row_idx, line) in coral_lines.iter().enumerate() {
+            let row = (top_row + row_idx as i32) as usize;
+            for (col_idx, ch) in line.chars().enumerate() {
+                let col = (anchor_col + col_idx as i32) as usize;
+                assert_eq!(
+                    screen[row][col], ch,
+                    "coral mismatch at (col={col}, row={row})"
+                );
+            }
+        }
+
+        for &(col, row, ch) in &sw_cells {
+            assert_eq!(
+                screen[row as usize][col as usize], ch,
+                "seaweed mismatch at (col={col}, row={row})"
+            );
+        }
+    }
+
+    #[test]
+    fn coral_transparent_spaces_preserve_seaweed_behind_branches() {
+        let width = 40u16;
+        let height = 12u16;
+        let coral = Coral::new(0.0, CORAL_SPECIES[0], FishColor::Magenta);
+        let anchor_col = coral.anchor_col(width);
+        let top_row = coral.top_row(height);
+        assert_eq!(anchor_col, 0);
+        assert_eq!(top_row, 8);
+
+        // Place seaweed root at col 3:
+        // - row 11 (coral row 3 col 3 = '_') is occluded by coral branch
+        // - row 10 (coral row 2 col 3 = ' ') shows seaweed through coral gap
+        let seaweed = Seaweed::new(3.0 / 39.0, 5, FishColor::BrightGreen, 0.0, 0.0);
+        let sw_cells = seaweed.cells(width, height);
+        assert_eq!(sw_cells[0].0, 3);
+        assert_eq!(sw_cells[0].1, 11);
+        assert_eq!(sw_cells[1].0, 3);
+        assert_eq!(sw_cells[1].1, 10);
+
+        let aq = Aquarium::from_fish(width, height, vec![], 1.0)
+            .with_scenery(Scenery::from_parts(vec![coral.clone()], vec![seaweed.clone()]));
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+        renderer.render_to(&mut buf, &aq, true).unwrap();
+
+        let w_usize = width as usize;
+        // Root at (3, 11) is covered by coral's '_'
+        assert_eq!(
+            renderer.prev_grid[11 * w_usize + 3],
+            Cell {
+                ch: '_',
+                color: Some(FishColor::Magenta),
+            }
+        );
+        // Cell at (3, 10) sits inside staghorn coral's transparent ' ' gap, keeping seaweed visible
+        assert_eq!(coral.lines()[2].as_bytes()[3], b' ');
+        assert_eq!(
+            renderer.prev_grid[10 * w_usize + 3],
+            Cell {
+                ch: sw_cells[1].2,
+                color: Some(FishColor::BrightGreen),
+            }
+        );
+
+        // Verify all seaweed cells against coral opacity
+        let mut gap_count = 0usize;
+        let mut occluded_count = 0usize;
+        for &(col, row, sw_ch) in &sw_cells {
+            let idx = (row as usize) * w_usize + (col as usize);
+            let rel_row = row - top_row;
+            let rel_col = col - anchor_col;
+            let coral_ch = if rel_row >= 0
+                && (rel_row as usize) < coral.lines().len()
+                && rel_col >= 0
+                && (rel_col as usize) < coral.lines()[rel_row as usize].len()
+            {
+                coral.lines()[rel_row as usize].chars().nth(rel_col as usize).unwrap()
+            } else {
+                ' '
+            };
+
+            if coral_ch == ' ' {
+                gap_count += 1;
+                assert_eq!(
+                    renderer.prev_grid[idx],
+                    Cell {
+                        ch: sw_ch,
+                        color: Some(FishColor::BrightGreen),
+                    }
+                );
+            } else {
+                occluded_count += 1;
+                assert_eq!(
+                    renderer.prev_grid[idx],
+                    Cell {
+                        ch: coral_ch,
+                        color: Some(FishColor::Magenta),
+                    }
+                );
+            }
+        }
+        assert!(gap_count > 0 && occluded_count > 0);
+    }
+
+    #[test]
+    fn creatures_render_in_front_of_coral_and_seaweed() {
+        let width = 40u16;
+        let height = 8u16;
+        let w_usize = width as usize;
+
+        let coral = Coral::new(0.0, CORAL_SPECIES[0], FishColor::Yellow);
+        let seaweed = Seaweed::new(5.0 / 39.0, 4, FishColor::Green, 0.0, 0.0);
+
+        // Find a seeded LargeFish at y >= 3 so its body (rows 3..8) overlaps coral (rows 4..8) and seaweed (rows 4..8)
+        let mut large = None;
+        for seed in 0..50u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let candidate = Fish::spawn_kind(CreatureKind::LargeFish, 20, height, &mut rng);
+            if candidate.y().round() as i32 >= 3 {
+                large = Some(candidate);
+                break;
+            }
+        }
+        let large = large.expect("seeded LargeFish overlapping seabed scenery");
+
+        let mut crab_rng = StdRng::seed_from_u64(7);
+        let crab = Fish::spawn_kind(CreatureKind::Crab, 11, height, &mut crab_rng);
+        // Place SmallFish overlapping seaweed/coral at row 4..5, away from Crab (rows 6..8)
+        let small = Fish::new_for_test(4.0, 4.0, Direction::Right, FishColor::BrightRed, "><>");
+
+        let aq = Aquarium::from_fish(
+            width,
+            height,
+            vec![large.clone(), small.clone(), crab.clone()],
+            1.0,
+        )
+        .with_scenery(Scenery::from_parts(vec![coral.clone()], vec![seaweed.clone()]));
+
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+        renderer.render_to(&mut buf, &aq, true).unwrap();
+
+        // Build a scenery-only grid to confirm every tested creature actually overlaps non-space scenery
+        let mut scenery_grid = vec![Cell::EMPTY; w_usize * (height as usize)];
+        for (col, row, ch) in seaweed.cells(width, height) {
+            if ch != ' ' {
+                scenery_grid[(row as usize) * w_usize + (col as usize)] = Cell {
+                    ch,
+                    color: Some(seaweed.color()),
+                };
+            }
+        }
+        Renderer::draw_sprite_lines(
+            &mut scenery_grid,
+            width,
+            height,
+            coral.anchor_col(width),
+            coral.top_row(height),
+            coral.lines(),
+            Some(coral.color()),
+        );
+
+        let verify_foreground_creature = |creature: &Fish| {
+            let sx = creature.x().round() as i32;
+            let sy = creature.y().round() as i32;
+            let mut overlapped = 0usize;
+            for (r_idx, line) in creature.sprite_lines().iter().enumerate() {
+                let row = sy + r_idx as i32;
+                if row < 0 || row >= height as i32 {
+                    continue;
+                }
+                for (c_idx, ch) in line.chars().enumerate() {
+                    if ch == ' ' {
+                        continue;
+                    }
+                    let col = sx + c_idx as i32;
+                    if col >= 0 && col < width as i32 {
+                        let idx = (row as usize) * w_usize + (col as usize);
+                        if scenery_grid[idx] != Cell::EMPTY {
+                            overlapped += 1;
+                            assert_eq!(
+                                renderer.prev_grid[idx],
+                                Cell {
+                                    ch,
+                                    color: Some(creature.color()),
+                                },
+                                "creature {:?} at ({col}, {row}) must overwrite scenery",
+                                creature.kind()
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(
+                overlapped > 0,
+                "expected {:?} to overlap at least one non-space scenery cell",
+                creature.kind()
+            );
+        };
+
+        // Check LargeFish where not occluded by SmallFish or Crab
+        let mut fg_grid = vec![Cell::EMPTY; w_usize * (height as usize)];
+        for fg in [&small, &crab] {
+            Renderer::draw_sprite_lines(
+                &mut fg_grid,
+                width,
+                height,
+                fg.x().round() as i32,
+                fg.y().round() as i32,
+                fg.sprite_lines(),
+                Some(fg.color()),
+            );
+        }
+
+        let lx = large.x().round() as i32;
+        let ly = large.y().round() as i32;
+        let mut large_overlaps = 0usize;
+        for (r_idx, line) in large.sprite_lines().iter().enumerate() {
+            let row = ly + r_idx as i32;
+            for (c_idx, ch) in line.chars().enumerate() {
+                if ch == ' ' {
+                    continue;
+                }
+                let col = lx + c_idx as i32;
+                if col >= 0 && col < width as i32 && row >= 0 && row < height as i32 {
+                    let idx = (row as usize) * w_usize + (col as usize);
+                    if scenery_grid[idx] != Cell::EMPTY && fg_grid[idx] == Cell::EMPTY {
+                        large_overlaps += 1;
+                        assert_eq!(
+                            renderer.prev_grid[idx],
+                            Cell {
+                                ch,
+                                color: Some(large.color()),
+                            },
+                            "LargeFish at ({col}, {row}) must render in front of scenery"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(large_overlaps > 0, "LargeFish must overlap non-space scenery");
+
+        verify_foreground_creature(&small);
+        verify_foreground_creature(&crab);
+    }
+
+    #[test]
+    fn animated_seaweed_diffs_cleanly_across_frames_without_clearing() {
+        let width = 30u16;
+        let height = 12u16;
+        let stalk = Seaweed::new(0.5, 6, FishColor::BrightGreen, 0.0, 2.5);
+        let cells_frame1 = stalk.cells(width, height);
+
+        let mut aq = Aquarium::from_fish(width, height, vec![], 1.0)
+            .with_scenery(Scenery::from_parts(vec![], vec![stalk]));
+        let mut renderer = Renderer::new();
+
+        let mut buf1 = Vec::new();
+        renderer.render_to(&mut buf1, &aq, false).unwrap();
+        let out1 = String::from_utf8(buf1).unwrap();
+        assert!(out1.contains("\x1b[2J"), "first frame must clear screen");
+        let mut screen = parse_ansi_screen(&out1, width, height);
+
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut cells_frame2 = cells_frame1.clone();
+        for _ in 0..40 {
+            aq.update(0.1, &mut rng);
+            cells_frame2 = aq.scenery().seaweed()[0].cells(width, height);
+            if cells_frame2
+                .iter()
+                .zip(cells_frame1.iter())
+                .any(|(a, b)| a.0 != b.0)
+            {
+                break;
+            }
+        }
+        assert_ne!(
+            cells_frame2, cells_frame1,
+            "seaweed must sway to new column coordinates after updates"
+        );
+
+        let mut buf2 = Vec::new();
+        renderer.render_to(&mut buf2, &aq, false).unwrap();
+        let out2 = String::from_utf8(buf2).unwrap();
+        assert!(
+            !out2.contains("\x1b[2J"),
+            "second frame must not emit full-screen clear: {out2:?}"
+        );
+
+        apply_ansi_screen(&mut screen, &out2);
+
+        // Build expected screen for frame 2 and confirm old vacated cells are erased to ' '
+        let mut expected = vec![vec![' '; width as usize]; height as usize];
+        for &(col, row, ch) in &cells_frame2 {
+            expected[row as usize][col as usize] = ch;
+        }
+        assert_eq!(screen, expected);
+
+        for &(col, row, _) in &cells_frame1 {
+            if !cells_frame2.iter().any(|&(c2, r2, _)| c2 == col && r2 == row) {
+                assert_eq!(
+                    screen[row as usize][col as usize], ' ',
+                    "vacated seaweed cell at ({col}, {row}) must be erased"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scenery_supports_no_color_mode_and_zero_or_tiny_sizes_safely() {
+        let corals: Vec<Coral> = CORAL_SPECIES
+            .iter()
+            .enumerate()
+            .map(|(i, &sprite)| Coral::new(i as f32 * 0.25, sprite, FishColor::ALL[i]))
+            .collect();
+        let seaweed = vec![
+            Seaweed::new(0.2, 5, FishColor::Green, 0.0, 1.5),
+            Seaweed::new(0.8, 4, FishColor::BrightGreen, 1.2, 2.0),
+        ];
+
+        let aq = Aquarium::from_fish(60, 16, vec![], 1.0)
+            .with_scenery(Scenery::from_parts(corals.clone(), seaweed.clone()));
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+        renderer
+            .render_to(&mut buf, &aq, false)
+            .expect("no-color scenery render should succeed");
+        let output = String::from_utf8(buf).expect("valid utf8");
+
+        assert!(!output.contains("\x1b[38;"), "must not emit 256/truecolor SGR");
+        assert!(!output.contains("\x1b[0m"), "must not emit SGR reset");
+        for code in (30..=37).chain(90..=97) {
+            assert!(
+                !output.contains(&format!("\x1b[{code}m")),
+                "must not emit SGR color code {code}: {output:?}"
+            );
+        }
+
+        for (w, h) in [(0u16, 0u16), (10, 0), (0, 10), (4, 2)] {
+            let tiny_aq = Aquarium::from_fish(w, h, vec![], 1.0)
+                .with_scenery(Scenery::from_parts(corals.clone(), seaweed.clone()));
+            let mut tiny_renderer = Renderer::new();
+            let mut tiny_buf = Vec::new();
+            tiny_renderer
+                .render_to(&mut tiny_buf, &tiny_aq, true)
+                .expect("render with scenery at tiny/zero size must not fail");
+            if w == 0 || h == 0 {
+                assert!(tiny_buf.is_empty());
             }
         }
     }
